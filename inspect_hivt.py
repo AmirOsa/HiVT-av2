@@ -16,7 +16,7 @@ from datasets import ArgoverseV2Dataset
 from models.hivt import HiVT
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MF_DATA_ROOT  = "/content/drive/MyDrive/Amir_Dataset/HiVT-project/av2/motion-forecasting"
+MF_DATA_ROOT  = "/content/drive/MyDrive/Amir_Dataset/HiVT-project_SMF/av2/motion-forecasting"
 CKPT_PATH     = "/content/drive/MyDrive/Amir_Dataset/HiVT_av2_checkpoints/epoch=63-step=4032.ckpt"
 OUTPUT_CSV    = "/content/drive/MyDrive/Amir_Dataset/HiVT-project_Confidence/hivt_predictions_inspection.csv"
 BATCH_SIZE    = 1  # Keep at 1 so we can track per-scenario info easily
