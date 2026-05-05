@@ -181,6 +181,7 @@ with torch.no_grad():
                     'scenario_id'        : seq_id,
                     'log_id'             : log_id,
                     'track_id'           : track_id,
+                    'object_category'    : int(scenario_parquet[scenario_parquet['track_id'] == track_id]['object_category'].iloc[0]) if scenario_parquet is not None and track_id in scenario_parquet['track_id'].values else 0,
                     'is_focal_agent'     : is_focal,
                     'best_mode'          : int(best_mode),
                     'predicted_intention': predicted_intention,
@@ -210,7 +211,10 @@ df = pd.DataFrame(rows)
 
 # ── Helper: print summary for a subset ───────────────────────────────────────
 def print_summary(subset, label):
-    known    = subset[subset['actual_intention'] != 'UNKNOWN']
+    known = subset[
+        (subset['actual_intention'] != 'UNKNOWN') &
+        (subset['object_category'] >= 1)
+    ]
     n_total  = len(known)
     n_correct = known['correct'].sum()
     avg_conf  = known['traj_confidence'].mean() if n_total > 0 else 0.0
@@ -243,6 +247,8 @@ for log_id in df['log_id'].unique():
         print(f"  {'track_id':<40} {'focal':<8} {'predicted':<22} {'actual':<22} {'correct':<8} {'conf':<8} {'all modes'}")
         print(f"  {'-'*150}")
         scen_df = log_df[log_df['scenario_id'] == scenario_id]
+        # Only show scored agents
+        scen_df = scen_df[scen_df['object_category'] >= 1]
         for _, row in scen_df.iterrows():
             mode_str = " | ".join([
                 f"m{i}:{row[f'mode_{i}_intention'][:4]}({row[f'mode_{i}_prob']:.2f})"
