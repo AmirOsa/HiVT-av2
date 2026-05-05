@@ -135,6 +135,7 @@ with torch.no_grad():
                     focal_track_id = focal_ids[0]
 
             # Get focal agent's 6 trajectories and probabilities
+            focal_index = data.agent_index.item() if hasattr(data, 'agent_index') else 0
             focal_trajs = y_hat[:, focal_index, :, :2].cpu().numpy()  # [6, 60, 2]
             focal_probs = probs[focal_index].cpu().numpy()             # [6]
 
