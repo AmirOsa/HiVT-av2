@@ -12,6 +12,7 @@ sys.path.insert(0, REPO_DIR)
 
 from datasets import ArgoverseV2Dataset
 from models.hivt import HiVT
+from av2.map.map_api import ArgoverseStaticMap
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MF_DATA_ROOT = "/content/drive/MyDrive/Amir_Dataset/HiVT-project_SMF/av2/motion-forecasting"
@@ -20,38 +21,123 @@ OUTPUT_CSV   = "/content/drive/MyDrive/Amir_Dataset/HiVT-project_Confidence/hivt
 BATCH_SIZE   = 1
 DEVICE       = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-TURN_THRESH_DEG        = 20.0
-LANE_CHANGE_THRESH_DEG = 5.0
+# ── Constants matching Nadeem's heuristic ─────────────────────────────────────
+MIN_SPEED_STOPPED               = 0.5   # m/s — below this: PARKED or STOPPING
+MIN_SPEED_MOVING                = 1.0   # m/s — FIX 1: turns only assigned above this
+PARKED_MAX_DISP_M               = 0.5   # meters
+HEADING_CHANGE_THRESH_TURN      = 20.0  # degrees
+HEADING_CHANGE_THRESH_LANE_KEEP = 5.0   # degrees
+KEEP_LANE_MAX_LAT_DIST          = 0.5   # meters — FIX 3: lateral displacement check
+
+# ── Helper: load map for a scenario ──────────────────────────────────────────
+def load_static_map(raw_dir):
+    """Load ArgoverseStaticMap from scenario folder. Returns None if not found."""
+    map_files = list(Path(raw_dir).glob("log_map_archive_*.json"))
+    if not map_files:
+        return None
+    try:
+        return ArgoverseStaticMap.from_json(map_files[0])
+    except Exception as e:
+        print(f"  ⚠️  Could not load map: {e}")
+        return None
+
+# ── Helper: check if a city-frame position is inside an intersection ──────────
+def is_in_intersection(city_pos_xy, static_map):
+    """
+    Returns True if the given [x, y] city-frame position falls inside
+    any intersection lane segment in the map.
+    """
+    if static_map is None or city_pos_xy is None:
+        return False
+    try:
+        import shapely.geometry as shp
+        point = shp.Point(city_pos_xy[0], city_pos_xy[1])
+        for ls in static_map.get_scenario_lane_segments():
+            if ls.is_intersection:
+                polygon = shp.Polygon(ls.polygon_boundary[:, :2])
+                if polygon.contains(point):
+                    return True
+        return False
+    except Exception:
+        return False
 
 # ── Helper: infer intention from trajectory ───────────────────────────────────
-def infer_intention_from_trajectory(traj):
+def infer_intention_from_trajectory(traj, city_pos_at_t49=None, static_map=None):
+    """
+    Replicates Nadeem's get_vehicle_intention_heuristic_enhanced.
+
+    traj            : [N, 2] agent-centric local frame, up to 60 steps
+    city_pos_at_t49 : [2] city-frame position at timestep 49, used for
+                      intersection check (FIX 2). Pass None to skip.
+    static_map      : ArgoverseStaticMap instance (FIX 2). Pass None to skip.
+    """
     if traj.shape[0] < 2:
         return "OTHER"
 
-    speeds       = np.linalg.norm(np.diff(traj, axis=0), axis=1) / 0.1
+    # ── Speed and displacement ────────────────────────────────────────────────
+    diffs        = np.diff(traj, axis=0)
+    step_dists   = np.linalg.norm(diffs, axis=1)
+    speeds       = step_dists / 0.1          # convert to m/s at 10 Hz
     avg_speed    = speeds.mean()
     displacement = np.linalg.norm(traj[-1] - traj[0])
 
-    if avg_speed < 0.5:
-        return "PARKED" if displacement < 0.5 else "STOPPING_STOPPED"
+    # ── PARKED / STOPPING_STOPPED ─────────────────────────────────────────────
+    if avg_speed < MIN_SPEED_STOPPED:
+        if displacement < PARKED_MAX_DISP_M:
+            return "PARKED"
+        else:
+            return "STOPPING_STOPPED"
 
-    start_vec = traj[min(5, len(traj)-1)] - traj[0]
-    end_vec   = traj[-1] - traj[max(0, len(traj)-6)]
+    # ── Heading change ────────────────────────────────────────────────────────
+    n         = len(traj)
+    start_vec = traj[min(5, n-1)] - traj[0]
+    end_vec   = traj[-1] - traj[max(0, n-6)]
+
+    if np.linalg.norm(start_vec) < 0.1 or np.linalg.norm(end_vec) < 0.1:
+        return "KEEP_LANE"
 
     initial_heading    = np.arctan2(start_vec[1], start_vec[0])
     final_heading      = np.arctan2(end_vec[1], end_vec[0])
     heading_change_deg = np.degrees(final_heading - initial_heading)
-    heading_change_deg = (heading_change_deg + 180) % 360 - 180
+    heading_change_deg = (heading_change_deg + 180) % 360 - 180  # [-180, 180]
 
-    if abs(heading_change_deg) > TURN_THRESH_DEG:
+    # ── TURN LEFT / TURN RIGHT ────────────────────────────────────────────────
+    # FIX 1: only assign turn if avg_speed > MIN_SPEED_MOVING (1.0 m/s)
+    if avg_speed > MIN_SPEED_MOVING and abs(heading_change_deg) > HEADING_CHANGE_THRESH_TURN:
         return "TURN_LEFT" if heading_change_deg > 0 else "TURN_RIGHT"
-    elif abs(heading_change_deg) > LANE_CHANGE_THRESH_DEG:
-        return "LEFT_CHANGE_LANE" if heading_change_deg > 0 else "RIGHT_CHANGE_LANE"
-    else:
-        return "KEEP_LANE"
+
+    # ── LEFT / RIGHT CHANGE LANE ──────────────────────────────────────────────
+    # FIX 2: skip lane change label if agent is inside an intersection
+    # (Nadeem uses map context to exclude intersection maneuvers from lane change)
+    if (abs(heading_change_deg) > HEADING_CHANGE_THRESH_LANE_KEEP and
+            abs(heading_change_deg) <= HEADING_CHANGE_THRESH_TURN):
+
+        in_intersection = is_in_intersection(city_pos_at_t49, static_map)
+
+        if not in_intersection:
+            return "LEFT_CHANGE_LANE" if heading_change_deg > 0 else "RIGHT_CHANGE_LANE"
+        # if in intersection, fall through to KEEP_LANE / OTHER below
+
+    # ── KEEP_LANE ─────────────────────────────────────────────────────────────
+    # FIX 3: lateral displacement must stay within lane width (0.5m)
+    if abs(heading_change_deg) <= HEADING_CHANGE_THRESH_LANE_KEEP:
+        direction = traj[-1] - traj[0]
+        dir_norm  = np.linalg.norm(direction)
+        if dir_norm > 0.01:
+            direction_unit = direction / dir_norm
+            perp           = np.array([-direction_unit[1], direction_unit[0]])
+            lateral_devs   = np.abs((traj - traj[0]) @ perp)
+            max_lat_dev    = lateral_devs.max()
+        else:
+            max_lat_dev = 0.0
+
+        if max_lat_dev <= KEEP_LANE_MAX_LAT_DIST:
+            return "KEEP_LANE"
+
+    return "OTHER"
 
 # ── Helper: get ground truth intention from parquet future steps ──────────────
-def get_ground_truth_intention(scenario_parquet, track_id):
+def get_ground_truth_intention(scenario_parquet, track_id, static_map):
     if scenario_parquet is None:
         return "UNKNOWN"
 
@@ -79,18 +165,20 @@ def get_ground_truth_intention(scenario_parquet, track_id):
         float(obs_df['position_y'].iloc[0])
     ])
 
+    # City-frame position at t49 for intersection check
+    city_pos_at_t49 = origin.copy()
+
     # Mirror exactly what process_argoverse_v2 does:
     # local_pos = (pos - origin) @ rotate_mat
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
+    cos_h      = np.cos(heading)
+    sin_h      = np.sin(heading)
     rotate_mat = np.array([
         [ cos_h, -sin_h],
         [ sin_h,  cos_h]
     ])
+    traj = (traj - origin) @ rotate_mat
 
-    traj = (traj - origin) @ rotate_mat  # same operation as the dataset
-
-    return infer_intention_from_trajectory(traj)
+    return infer_intention_from_trajectory(traj, city_pos_at_t49, static_map)
 
 # ── Load model ────────────────────────────────────────────────────────────────
 print("Loading HiVT model...")
@@ -133,7 +221,7 @@ with torch.no_grad():
             # pi:    [N, 6]
             probs = torch.softmax(pi, dim=-1)  # [N, 6]
 
-            # Get scenario info
+            # ── Scenario info ─────────────────────────────────────────────────
             seq_id = data.seq_id if hasattr(data, 'seq_id') else f"scenario_{batch_idx}"
             if isinstance(seq_id, list):
                 seq_id = seq_id[0]
@@ -141,7 +229,7 @@ with torch.no_grad():
             parts  = seq_id.rsplit('_w', 1)
             log_id = parts[0] if len(parts) == 2 else seq_id
 
-            # Load raw parquet
+            # ── Load raw parquet ──────────────────────────────────────────────
             scenario_parquet = None
             raw_dir = os.path.join(
                 MF_DATA_ROOT, "dataset", "train", "scenarios", seq_id
@@ -150,36 +238,58 @@ with torch.no_grad():
             if parquet_files:
                 scenario_parquet = pd.read_parquet(parquet_files[0])
 
+            # ── Load map for intersection check (FIX 2) ───────────────────────
+            static_map = load_static_map(raw_dir)
+
+            # ── Focal track id directly from parquet ──────────────────────────
             focal_track_id = "UNKNOWN"
             if scenario_parquet is not None:
                 focal_ids = scenario_parquet['focal_track_id'].unique()
                 if len(focal_ids) > 0:
                     focal_track_id = focal_ids[0]
 
-            # Get focal agent's 6 trajectories and probabilities
+            # ── Focal agent trajectories and probabilities ────────────────────
             focal_index = data.agent_index.item() if hasattr(data, 'agent_index') else 0
             focal_trajs = y_hat[:, focal_index, :, :2].cpu().numpy()  # [6, 60, 2]
             focal_probs = probs[focal_index].cpu().numpy()             # [6]
 
-            # Best mode
             best_mode = focal_probs.argmax()
             best_traj = focal_trajs[best_mode]
             best_prob = focal_probs[best_mode]
 
-            # Predicted intention from best trajectory
-            predicted_intention = infer_intention_from_trajectory(best_traj)
+            # ── City-frame position at t49 for intersection check ─────────────
+            city_pos_at_t49 = None
+            if scenario_parquet is not None and focal_track_id != "UNKNOWN":
+                obs_df = scenario_parquet[
+                    (scenario_parquet['track_id'] == focal_track_id) &
+                    (scenario_parquet['timestep'] == 49)
+                ]
+                if len(obs_df) > 0:
+                    city_pos_at_t49 = np.array([
+                        float(obs_df['position_x'].iloc[0]),
+                        float(obs_df['position_y'].iloc[0])
+                    ])
 
-            # Ground truth intention
-            actual_intention = get_ground_truth_intention(scenario_parquet, focal_track_id)
-            correct = (predicted_intention == actual_intention) if actual_intention != "UNKNOWN" else None
+            # ── Predicted intention ───────────────────────────────────────────
+            predicted_intention = infer_intention_from_trajectory(
+                best_traj, city_pos_at_t49, static_map
+            )
 
-            # All 6 mode intentions
+            # ── Ground truth intention ────────────────────────────────────────
+            actual_intention = get_ground_truth_intention(
+                scenario_parquet, focal_track_id, static_map
+            )
+            correct = (predicted_intention == actual_intention) \
+                if actual_intention != "UNKNOWN" else None
+
+            # ── All 6 mode intentions ─────────────────────────────────────────
             mode_intentions = [
-                infer_intention_from_trajectory(focal_trajs[m]) for m in range(6)
+                infer_intention_from_trajectory(focal_trajs[m], city_pos_at_t49, static_map)
+                for m in range(6)
             ]
 
-            # Get focal agent object_category
-            focal_category = 3  # focal is always category 3
+            # ── Focal agent object_category ───────────────────────────────────
+            focal_category = 3
             if scenario_parquet is not None and focal_track_id in scenario_parquet['track_id'].values:
                 focal_category = int(scenario_parquet[
                     scenario_parquet['track_id'] == focal_track_id
@@ -212,6 +322,7 @@ with torch.no_grad():
 
         except Exception as e:
             print(f"❌ Error on scenario {batch_idx}: {e}")
+            import traceback; traceback.print_exc()
             continue
 
 # ── Build DataFrame ───────────────────────────────────────────────────────────
