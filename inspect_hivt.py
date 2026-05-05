@@ -67,6 +67,19 @@ def get_ground_truth_intention(scenario_parquet, track_id):
 
     # Normalize to agent-centric frame (same as HiVT's output frame)
     traj = traj - traj[0]  # origin at first future timestep
+
+    # Get heading at timestep 49 (last observed) to rotate into agent-centric frame
+    obs_df = scenario_parquet[
+        (scenario_parquet['track_id'] == track_id) &
+        (scenario_parquet['timestep'] == 49)
+    ]
+    if len(obs_df) == 0:
+        return infer_intention_from_trajectory(traj)
+
+    heading = float(obs_df['heading'].iloc[0])
+    cos_h, sin_h = np.cos(-heading), np.sin(-heading)
+    rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
+    traj = (rot @ traj.T).T  # rotate all points
     
     return infer_intention_from_trajectory(traj)
 
