@@ -65,22 +65,31 @@ def get_ground_truth_intention(scenario_parquet, track_id):
 
     traj = agent_df[['position_x', 'position_y']].to_numpy()
 
-    # Normalize to agent-centric frame (same as HiVT's output frame)
-    traj = traj - traj[0]  # origin at first future timestep
-
-    # Get heading at timestep 49 (last observed) to rotate into agent-centric frame
+    # Get origin and heading from timestep 49 (last observed step)
     obs_df = scenario_parquet[
         (scenario_parquet['track_id'] == track_id) &
         (scenario_parquet['timestep'] == 49)
     ]
     if len(obs_df) == 0:
-        return infer_intention_from_trajectory(traj)
+        return "UNKNOWN"
 
     heading = float(obs_df['heading'].iloc[0])
-    cos_h, sin_h = np.cos(-heading), np.sin(-heading)
-    rot = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
-    traj = (rot @ traj.T).T  # rotate all points
-    
+    origin  = np.array([
+        float(obs_df['position_x'].iloc[0]),
+        float(obs_df['position_y'].iloc[0])
+    ])
+
+    # Mirror exactly what process_argoverse_v2 does:
+    # local_pos = (pos - origin) @ rotate_mat
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    rotate_mat = np.array([
+        [ cos_h, -sin_h],
+        [ sin_h,  cos_h]
+    ])
+
+    traj = (traj - origin) @ rotate_mat  # same operation as the dataset
+
     return infer_intention_from_trajectory(traj)
 
 # ── Load model ────────────────────────────────────────────────────────────────
