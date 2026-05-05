@@ -64,6 +64,10 @@ def get_ground_truth_intention(scenario_parquet, track_id):
         return "UNKNOWN"
 
     traj = agent_df[['position_x', 'position_y']].to_numpy()
+
+    # Normalize to agent-centric frame (same as HiVT's output frame)
+    traj = traj - traj[0]  # origin at first future timestep
+    
     return infer_intention_from_trajectory(traj)
 
 # ── Load model ────────────────────────────────────────────────────────────────
@@ -124,14 +128,11 @@ with torch.no_grad():
             if parquet_files:
                 scenario_parquet = pd.read_parquet(parquet_files[0])
 
-            # Get ordered track_ids
-            track_ids_ordered = []
+            focal_track_id = "UNKNOWN"
             if scenario_parquet is not None:
-                track_ids_ordered = list(scenario_parquet.groupby('track_id').first().index)
-
-            # ── Only process focal agent ──────────────────────────────────────
-            focal_index = data.agent_index.item() if hasattr(data, 'agent_index') else 0
-            focal_track_id = track_ids_ordered[focal_index] if focal_index < len(track_ids_ordered) else "UNKNOWN"
+                focal_ids = scenario_parquet['focal_track_id'].unique()
+                if len(focal_ids) > 0:
+                    focal_track_id = focal_ids[0]
 
             # Get focal agent's 6 trajectories and probabilities
             focal_trajs = y_hat[:, focal_index, :, :2].cpu().numpy()  # [6, 60, 2]
