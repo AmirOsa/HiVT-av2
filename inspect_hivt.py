@@ -28,6 +28,7 @@ PARKED_MAX_DISP_M               = 0.5   # meters
 HEADING_CHANGE_THRESH_TURN      = 20.0  # degrees
 HEADING_CHANGE_THRESH_LANE_KEEP = 5.0   # degrees
 KEEP_LANE_MAX_LAT_DIST          = 0.5   # meters — FIX 3: lateral displacement check
+INTENTION_HORIZON_STEPS = 30  # 3s at 10Hz, matches Nadeem exactly
 
 # ── Helper: load map for a scenario ──────────────────────────────────────────
 def load_static_map(raw_dir):
@@ -71,7 +72,8 @@ def infer_intention_from_trajectory(traj, city_pos_at_t49=None, static_map=None)
                       intersection check (FIX 2). Pass None to skip.
     static_map      : ArgoverseStaticMap instance (FIX 2). Pass None to skip.
     """
-    if traj.shape[0] < 2:
+    traj = traj[:INTENTION_HORIZON_STEPS]
+    if traj.shape[0] < 5:
         return "OTHER"
 
     # ── Speed and displacement ────────────────────────────────────────────────
@@ -143,7 +145,8 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
 
     agent_df = scenario_parquet[
         (scenario_parquet['track_id'] == track_id) &
-        (scenario_parquet['timestep'] >= 50)
+        (scenario_parquet['timestep'] >= 50) &
+        (scenario_parquet['timestep'] < 80)
     ].sort_values('timestep')
 
     if len(agent_df) < 5:
