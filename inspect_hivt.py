@@ -173,8 +173,8 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
     cos_h      = np.cos(heading)
     sin_h      = np.sin(heading)
     rotate_mat = np.array([
-        [ cos_h, -sin_h],
-        [ sin_h,  cos_h]
+        [ cos_h,  sin_h],
+        [-sin_h,  cos_h]
     ])
     traj = (traj - origin) @ rotate_mat
 
