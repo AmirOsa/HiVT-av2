@@ -138,9 +138,16 @@ def infer_intention_from_trajectory(traj, city_pos_at_t49=None, static_map=None)
 
 # ── Helper: get ground truth intention from parquet future steps ──────────────
 def get_ground_truth_intention(scenario_parquet, track_id, static_map):
+    """
+    Computes GT intention from parquet future trajectory.
+    Uses annotated heading column directly — matches Nadeem's quaternion-based
+    heading computation rather than deriving heading from position differences.
+    GT window: timesteps 50-79 (3s at 10Hz, matching Nadeem's training convention).
+    """
     if scenario_parquet is None:
         return "UNKNOWN"
 
+    # ── Future trajectory: 30 steps (3s) to match Nadeem's GT convention ─────
     agent_df = scenario_parquet[
         (scenario_parquet['track_id'] == track_id) &
         (scenario_parquet['timestep'] >= 50) &
@@ -150,36 +157,64 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
     if len(agent_df) < 5:
         return "UNKNOWN"
 
+    # ── Positions in city frame ───────────────────────────────────────────────
     traj = agent_df[['position_x', 'position_y']].to_numpy()
 
-    # Get origin and heading from timestep 49 (last observed step)
-    obs_df = scenario_parquet[
-        (scenario_parquet['track_id'] == track_id) &
-        (scenario_parquet['timestep'] == 49)
-    ]
-    if len(obs_df) == 0:
-        return "UNKNOWN"
+    # ── Speed and displacement ────────────────────────────────────────────────
+    diffs      = np.diff(traj, axis=0)
+    step_dists = np.linalg.norm(diffs, axis=1)
+    speeds     = step_dists / 0.1          # 10 Hz → m/s
+    avg_speed  = speeds.mean()
+    displacement = np.linalg.norm(traj[-1] - traj[0])
 
-    heading = float(obs_df['heading'].iloc[0])
-    origin  = np.array([
-        float(obs_df['position_x'].iloc[0]),
-        float(obs_df['position_y'].iloc[0])
+    # ── Heading from annotated column — matches Nadeem's quaternion method ────
+    start_heading_rad  = float(agent_df.iloc[0]['heading'])
+    end_heading_rad    = float(agent_df.iloc[-1]['heading'])
+    heading_change_rad = np.arctan2(
+        np.sin(end_heading_rad - start_heading_rad),
+        np.cos(end_heading_rad - start_heading_rad)
+    )
+    heading_change_deg = np.degrees(heading_change_rad)
+
+    # ── City-frame position at t50 for intersection check ────────────────────
+    city_pos = np.array([
+        float(agent_df.iloc[0]['position_x']),
+        float(agent_df.iloc[0]['position_y'])
     ])
 
-    # City-frame position at t49 for intersection check
-    city_pos_at_t49 = origin.copy()
+    # ── PARKED / STOPPING_STOPPED ─────────────────────────────────────────────
+    if avg_speed < MIN_SPEED_STOPPED:
+        if displacement < PARKED_MAX_DISP_M:
+            return "PARKED"
+        else:
+            return "STOPPING_STOPPED"
 
-    # Mirror exactly what process_argoverse_v2 does:
-    # local_pos = (pos - origin) @ rotate_mat
-    cos_h      = np.cos(heading)
-    sin_h      = np.sin(heading)
-    rotate_mat = np.array([
-        [ cos_h, -sin_h],
-        [ sin_h,  cos_h]
-    ])
-    traj = (traj - origin) @ rotate_mat
+    # ── TURN LEFT / TURN RIGHT ────────────────────────────────────────────────
+    if avg_speed > MIN_SPEED_MOVING and abs(heading_change_deg) > HEADING_CHANGE_THRESH_TURN:
+        return "TURN_LEFT" if heading_change_deg > 0 else "TURN_RIGHT"
 
-    return infer_intention_from_trajectory(traj, city_pos_at_t49, static_map)
+    # ── LEFT / RIGHT CHANGE LANE ──────────────────────────────────────────────
+    if (abs(heading_change_deg) > HEADING_CHANGE_THRESH_LANE_KEEP and
+            abs(heading_change_deg) <= HEADING_CHANGE_THRESH_TURN):
+        if not is_in_intersection(city_pos, static_map):
+            return "LEFT_CHANGE_LANE" if heading_change_deg > 0 else "RIGHT_CHANGE_LANE"
+
+    # ── KEEP_LANE ─────────────────────────────────────────────────────────────
+    if abs(heading_change_deg) <= HEADING_CHANGE_THRESH_LANE_KEEP:
+        direction = traj[-1] - traj[0]
+        dir_norm  = np.linalg.norm(direction)
+        if dir_norm > 0.01:
+            direction_unit = direction / dir_norm
+            perp           = np.array([-direction_unit[1], direction_unit[0]])
+            lateral_devs   = np.abs((traj - traj[0]) @ perp)
+            max_lat_dev    = lateral_devs.max()
+        else:
+            max_lat_dev = 0.0
+
+        if max_lat_dev <= KEEP_LANE_MAX_LAT_DIST:
+            return "KEEP_LANE"
+
+    return "OTHER"
 
 # ── Load model ────────────────────────────────────────────────────────────────
 print("Loading HiVT model...")
