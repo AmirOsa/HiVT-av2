@@ -28,7 +28,6 @@ PARKED_MAX_DISP_M               = 0.5   # meters
 HEADING_CHANGE_THRESH_TURN      = 20.0  # degrees
 HEADING_CHANGE_THRESH_LANE_KEEP = 5.0   # degrees
 KEEP_LANE_MAX_LAT_DIST          = 0.5   # meters — FIX 3: lateral displacement check
-INTENTION_HORIZON_STEPS = 30  # 3s at 10Hz, matches Nadeem exactly
 
 # ── Helper: load map for a scenario ──────────────────────────────────────────
 def load_static_map(raw_dir):
@@ -72,7 +71,6 @@ def infer_intention_from_trajectory(traj, city_pos_at_t49=None, static_map=None)
                       intersection check (FIX 2). Pass None to skip.
     static_map      : ArgoverseStaticMap instance (FIX 2). Pass None to skip.
     """
-    traj = traj[:INTENTION_HORIZON_STEPS]
     if traj.shape[0] < 5:
         return "OTHER"
 
@@ -275,7 +273,7 @@ with torch.no_grad():
 
             # ── Predicted intention ───────────────────────────────────────────
             predicted_intention = infer_intention_from_trajectory(
-                best_traj, city_pos_at_t49, static_map
+                best_traj[:30], city_pos_at_t49, static_map
             )
 
             # ── Ground truth intention ────────────────────────────────────────
@@ -287,7 +285,7 @@ with torch.no_grad():
 
             # ── All 6 mode intentions ─────────────────────────────────────────
             mode_intentions = [
-                infer_intention_from_trajectory(focal_trajs[m], city_pos_at_t49, static_map)
+                infer_intention_from_trajectory(focal_trajs[m][:30], city_pos_at_t49, static_map)
                 for m in range(6)
             ]
 
