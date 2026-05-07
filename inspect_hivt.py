@@ -308,7 +308,7 @@ with torch.no_grad():
 
             # ── Predicted intention ───────────────────────────────────────────
             predicted_intention = infer_intention_from_trajectory(
-                best_traj[:30], city_pos_at_t49, static_map
+                best_traj, city_pos_at_t49, static_map
             )
 
             # ── Ground truth intention ────────────────────────────────────────
@@ -320,7 +320,7 @@ with torch.no_grad():
 
             # ── All 6 mode intentions ─────────────────────────────────────────
             mode_intentions = [
-                infer_intention_from_trajectory(focal_trajs[m][:30], city_pos_at_t49, static_map)
+                infer_intention_from_trajectory(focal_trajs[m], city_pos_at_t49, static_map)
                 for m in range(6)
             ]
 
