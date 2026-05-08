@@ -160,11 +160,11 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
     # ── Positions in city frame ───────────────────────────────────────────────
     traj = agent_df[['position_x', 'position_y']].to_numpy()
 
-    # ── Speed and displacement ────────────────────────────────────────────────
-    diffs      = np.diff(traj, axis=0)
-    step_dists = np.linalg.norm(diffs, axis=1)
-    speeds     = step_dists / 0.1          # 10 Hz → m/s
-    avg_speed  = speeds.mean()
+    # ── Speed from velocity columns (correct — avoids ego-motion contamination) ──
+    speeds    = np.sqrt(agent_df['velocity_x']**2 + agent_df['velocity_y']**2).values
+    avg_speed = speeds.mean()
+
+    # ── Displacement still from positions ────────────────────────────────────────
     displacement = np.linalg.norm(traj[-1] - traj[0])
 
     # ── Heading from annotated column — matches Nadeem's quaternion method ────
