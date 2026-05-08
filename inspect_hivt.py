@@ -119,21 +119,59 @@ def infer_intention_from_trajectory(traj, city_pos_at_t49=None, static_map=None)
         # if in intersection, fall through to KEEP_LANE / OTHER below
 
     # ── KEEP_LANE ─────────────────────────────────────────────────────────────
-    # FIX 3: lateral displacement must stay within lane width (0.5m)
-    if abs(heading_change_deg) <= HEADING_CHANGE_THRESH_LANE_KEEP:
-        direction = traj[-1] - traj[0]
-        dir_norm  = np.linalg.norm(direction)
-        if dir_norm > 0.01:
-            direction_unit = direction / dir_norm
-            perp           = np.array([-direction_unit[1], direction_unit[0]])
-            lateral_devs   = np.abs((traj - traj[0]) @ perp)
-            max_lat_dev    = lateral_devs.max()
-        else:
-            max_lat_dev = 0.0
-
-        if max_lat_dev <= KEEP_LANE_MAX_LAT_DIST:
+    if avg_speed >= MIN_SPEED_MOVING and abs(heading_change_deg) <= HEADING_CHANGE_THRESH_LANE_KEEP:
+        
+        can_check_polygons = False
+        points_stay_in_lane = False
+        
+        if static_map is not None and city_pos is not None:
+            try:
+                from shapely.geometry import Point
+                from shapely.vectorized import contains as shapely_contains
+                
+                nearby_segments = static_map.get_nearby_lane_segments(city_pos, 5.0)
+                if nearby_segments:
+                    # Get closest lane
+                    best_lane_id = min(nearby_segments, key=lambda x: x[1])[0]
+                    current_lane = static_map.vector_lane_segments.get(best_lane_id)
+                    
+                    if current_lane and not current_lane.is_intersection:
+                        successor_ids = static_map.get_lane_segment_successor_ids(best_lane_id) or set()
+                        valid_lane_ids = {best_lane_id}.union(successor_ids)
+                        valid_lane_polys = [
+                            p for p in [
+                                static_map.get_lane_segment_polygon(lid)
+                                for lid in valid_lane_ids
+                            ]
+                            if p is not None and p.is_valid
+                        ]
+                        
+                        if valid_lane_polys:
+                            can_check_polygons = True
+                            future_points = [
+                                Point(px, py) for px, py in
+                                zip(agent_df['position_x'].values, agent_df['position_y'].values)
+                            ]
+                            points_stay_in_lane = all(
+                                any(poly.contains(pt) for poly in valid_lane_polys)
+                                for pt in future_points
+                            )
+            except Exception:
+                can_check_polygons = False
+    
+        if can_check_polygons and points_stay_in_lane:
             return "KEEP_LANE"
-
+        elif not can_check_polygons:
+            # Fallback: lateral distance check
+            direction = traj[-1] - traj[0]
+            dir_norm  = np.linalg.norm(direction)
+            if dir_norm > 0.01:
+                direction_unit = direction / dir_norm
+                perp           = np.array([-direction_unit[1], direction_unit[0]])
+                lateral_devs   = np.abs((traj - traj[0]) @ perp)
+                if lateral_devs.max() <= KEEP_LANE_MAX_LAT_DIST:
+                    return "KEEP_LANE"
+    
     return "OTHER"
 
 # ── Helper: get ground truth intention from parquet future steps ──────────────
