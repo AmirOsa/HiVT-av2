@@ -201,6 +201,7 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
 
     # ── KEEP_LANE ─────────────────────────────────────────────────────────────
     if abs(heading_change_deg) <= HEADING_CHANGE_THRESH_LANE_KEEP:
+        # Check lateral deviation from agent's own path
         direction = traj[-1] - traj[0]
         dir_norm  = np.linalg.norm(direction)
         if dir_norm > 0.01:
@@ -210,11 +211,44 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
             max_lat_dev    = lateral_devs.max()
         else:
             max_lat_dev = 0.0
-
+    
         if max_lat_dev <= KEEP_LANE_MAX_LAT_DIST:
-            return "KEEP_LANE"
-
-    return "OTHER"
+            # Additionally check map lane alignment if map is available
+            if static_map is not None and city_pos is not None:
+                try:
+                    import shapely.geometry as shp
+                    agent_point = shp.Point(city_pos[0], city_pos[1])
+                    start_heading_vec = np.array([
+                        np.cos(start_h), np.sin(start_h)
+                    ])
+                    lane_aligned = False
+                    for ls in static_map.get_scenario_lane_segments():
+                        centerline = np.array(ls.centerline)[:, :2]
+                        # Check if agent is near this lane
+                        distances = np.linalg.norm(centerline - city_pos, axis=1)
+                        if distances.min() > 5.0:  # 5m radius
+                            continue
+                        # Check heading alignment with lane
+                        lane_vecs = np.diff(centerline, axis=0)
+                        for lv in lane_vecs:
+                            lv_norm = np.linalg.norm(lv)
+                            if lv_norm < 0.01:
+                                continue
+                            lv_unit = lv / lv_norm
+                            alignment = abs(np.dot(start_heading_vec, lv_unit))
+                            if alignment > 0.95:  # ~18° threshold
+                                lane_aligned = True
+                                break
+                        if lane_aligned:
+                            break
+                    if lane_aligned:
+                        return "KEEP_LANE"
+                    else:
+                        return "OTHER"
+                except Exception:
+                    return "KEEP_LANE"  # fallback if map check fails
+            else:
+                return "KEEP_LANE"
 
 # ── Load model ────────────────────────────────────────────────────────────────
 print("Loading HiVT model...")
