@@ -217,36 +217,40 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
             if static_map is not None and city_pos is not None:
                 try:
                     import shapely.geometry as shp
-                    agent_point = shp.Point(city_pos[0], city_pos[1])
-                    start_heading_vec = np.array([
-                        np.cos(start_h), np.sin(start_h)
-                    ])
+                    start_heading_vec = np.array([np.cos(start_h), np.sin(start_h)])
                     lane_aligned = False
                     for ls in static_map.get_scenario_lane_segments():
-                        centerline = np.array(ls.centerline)[:, :2]
+                        # Compute centerline from left and right boundaries
+                        left  = np.array(ls.left_lane_boundary.xyz)[:, :2]
+                        right = np.array(ls.right_lane_boundary.xyz)[:, :2]
+                        n_pts = min(len(left), len(right))
+                        centerline = (left[:n_pts] + right[:n_pts]) / 2.0
+            
                         # Check if agent is near this lane
                         distances = np.linalg.norm(centerline - city_pos, axis=1)
-                        if distances.min() > 5.0:  # 5m radius
+                        if distances.min() > 5.0:
                             continue
+            
                         # Check heading alignment with lane
                         lane_vecs = np.diff(centerline, axis=0)
                         for lv in lane_vecs:
                             lv_norm = np.linalg.norm(lv)
                             if lv_norm < 0.01:
                                 continue
-                            lv_unit = lv / lv_norm
+                            lv_unit   = lv / lv_norm
                             alignment = abs(np.dot(start_heading_vec, lv_unit))
-                            if alignment > 0.95:  # ~18° threshold
+                            if alignment > 0.95:
                                 lane_aligned = True
                                 break
                         if lane_aligned:
                             break
+            
                     if lane_aligned:
                         return "KEEP_LANE"
                     else:
                         return "OTHER"
                 except Exception:
-                    return "KEEP_LANE"  # fallback if map check fails
+                    return "KEEP_LANE"
             else:
                 return "KEEP_LANE"
 
