@@ -249,7 +249,7 @@ def get_ground_truth_intention(scenario_parquet, track_id, static_map):
                         return "KEEP_LANE"
                     else:
                         return "OTHER"
-                except Exception:
+                except Exception as e:
                     print(f"  ⚠️  Map check exception: {e}")
                     return "KEEP_LANE"
             else:
